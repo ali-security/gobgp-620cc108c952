@@ -16,6 +16,7 @@
 package rtr
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"math/rand"
 	"net"
@@ -115,4 +116,81 @@ func Test_RTRErrorReport(t *testing.T) {
 
 	// when it has both "erroneous PDU" and "Arbitrary Text"
 	verifyRTRMessage(t, NewRTRErrorReport(CORRUPT_DATA, errPDU, errText2))
+}
+
+// Test_ParseRTRShortMessage tests the CVE-2025-43973 fix.
+// ParseRTR used to index the received buffer without checking that a whole
+// common header is available, so a truncated PDU made it run off the end of
+// the buffer instead of returning an error.
+func Test_ParseRTRShortMessage(t *testing.T) {
+	for length := 0; length < RTR_MIN_LEN; length++ {
+		data := make([]byte, length)
+		if length > 1 {
+			// Use a known message type so that only the truncated
+			// length can make ParseRTR fail.
+			data[1] = RTR_RESET_QUERY
+		}
+		assert.NotPanics(t, func() {
+			msg, err := ParseRTR(data)
+			assert.Error(t, err, "ParseRTR should fail with %d bytes", length)
+			assert.Nil(t, msg, "ParseRTR should return no message with %d bytes", length)
+		}, "ParseRTR should not run off the end of a %d byte buffer", length)
+	}
+
+	// A complete PDU is still accepted.
+	buf, err := NewRTRResetQuery().Serialize()
+	require.NoError(t, err)
+	require.Equal(t, RTR_MIN_LEN, len(buf))
+
+	msg, err := ParseRTR(buf)
+	require.NoError(t, err)
+	assert.NotNil(t, msg)
+}
+
+// Test_SplitRTRLength tests the CVE-2025-43973 fix.
+// SplitRTR must never hand a buffer shorter than the advertised length over
+// to ParseRTR, whatever length the remote side advertises.
+func Test_SplitRTRLength(t *testing.T) {
+	buf, err := NewRTRSerialNotify(uint16(1), uint32(2)).Serialize()
+	require.NoError(t, err)
+	require.Equal(t, RTR_SERIAL_NOTIFY_LEN, len(buf))
+
+	// Not even the common header has been received yet.
+	advance, token, err := SplitRTR(buf[:RTR_MIN_LEN-1], false)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, advance)
+	assert.Nil(t, token)
+
+	// The common header is complete but the PDU is not.
+	advance, token, err = SplitRTR(buf[:len(buf)-1], false)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, advance)
+	assert.Nil(t, token)
+
+	// A length below the common header length is rejected.
+	broken := make([]byte, len(buf))
+	copy(broken, buf)
+	binary.BigEndian.PutUint32(broken[4:8], uint32(RTR_MIN_LEN-1))
+	_, _, err = SplitRTR(broken, false)
+	assert.Error(t, err)
+
+	// The largest length the remote side can advertise must be compared
+	// without wrapping around, on 32 bit platforms as well.
+	binary.BigEndian.PutUint32(broken[4:8], ^uint32(0))
+	assert.NotPanics(t, func() {
+		advance, token, err := SplitRTR(broken, false)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, advance)
+		assert.Nil(t, token)
+	}, "SplitRTR should not slice beyond the end of the buffer")
+
+	// A complete PDU is returned as a whole.
+	advance, token, err = SplitRTR(append(buf, buf...), false)
+	assert.NoError(t, err)
+	assert.Equal(t, len(buf), advance)
+	assert.Equal(t, buf, token)
+
+	msg, err := ParseRTR(token)
+	require.NoError(t, err)
+	assert.NotNil(t, msg)
 }

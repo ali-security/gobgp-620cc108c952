@@ -357,13 +357,16 @@ func SplitRTR(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if totalLen < RTR_MIN_LEN {
 		return 0, nil, fmt.Errorf("Invalid length: %d", totalLen)
 	}
-	if uint32(len(data)) < totalLen {
+	if uint64(len(data)) < uint64(totalLen) {
 		return 0, nil, nil
 	}
 	return int(totalLen), data[0:totalLen], nil
 }
 
 func ParseRTR(data []byte) (RTRMessage, error) {
+	if len(data) < RTR_MIN_LEN {
+		return nil, fmt.Errorf("not all bytes are available for RTR message")
+	}
 	var msg RTRMessage
 	switch data[1] {
 	case RTR_SERIAL_NOTIFY:
