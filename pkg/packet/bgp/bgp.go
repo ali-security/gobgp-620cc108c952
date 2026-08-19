@@ -7579,6 +7579,10 @@ func parseFlowSpecExtended(data []byte) (ExtendedCommunityInterface, error) {
 		dscp := data[7]
 		return NewTrafficRemarkExtended(dscp), nil
 	case EC_SUBTYPE_FLOWSPEC_REDIRECT_IP6:
+		if len(data) < 20 {
+			return nil, NewMessageError(BGP_ERROR_UPDATE_MESSAGE_ERROR, BGP_ERROR_SUB_MALFORMED_ATTRIBUTE_LIST, nil, "not all extended community bytes for IPv6 FlowSpec are available")
+		}
+
 		ipv6 := net.IP(data[2:18]).String()
 		localAdmin := binary.BigEndian.Uint16(data[18:20])
 		return NewRedirectIPv6AddressSpecificExtended(ipv6, localAdmin), nil
