@@ -1,0 +1,75 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    name: pack-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Write module-zip helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/modzip"
+          cat > "$HOME/modzip/create_mod.go" <<'HELPER'
+          package main
+
+          import (
+              "log"
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              if len(os.Args) != 5 {
+                  log.Fatal("usage: create_mod <module-path> <version> <source-dir> <output-zip>")
+              }
+              m := module.Version{Path: os.Args[1], Version: os.Args[2]}
+              f, err := os.Create(os.Args[4])
+              if err != nil {
+                  log.Fatal(err)
+              }
+              defer f.Close()
+              if err := zip.CreateFromDir(f, m, os.Args[3]); err != nil {
+                  log.Fatal(err)
+              }
+              log.Printf("created module zip: %s", os.Args[4])
+          }
+          HELPER
+          cd "$HOME/modzip"
+          go mod init example.com/modzip
+          go get golang.org/x/mod@v0.17.0
+
+      - name: Create module zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/seal_out"
+          cd "$HOME/modzip"
+          go run ./create_mod.go github.com/osrg/gobgp 'v2.0.0+incompatible' "$GITHUB_WORKSPACE" "${{ runner.temp }}/seal_out/v2.0.0+incompatible.zip"
+          ls -l "${{ runner.temp }}/seal_out"
+
+      - name: Upload module zip
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gobgp-module-zip
+          path: ${{ runner.temp }}/seal_out/v2.0.0+incompatible.zip
+          if-no-files-found: error

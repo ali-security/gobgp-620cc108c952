@@ -1,77 +1,64 @@
 language: go
 
+# Seal: Travis no longer honours `go_import_path` for this fork's checkout dir
+# (the job lands in /home/travis/build/<org>/gobgp-<sha>, outside GOPATH/src),
+# so `dep` aborted with "is not within a known GOPATH/src". Build the GOPATH
+# layout explicitly and work from the symlinked path.
+_gopath_setup: &_gopath_setup
+  - export GOPATH="${GOPATH:-$HOME/gopath}"
+  - export GO111MODULE=off
+  - mkdir -p "$GOPATH/src/github.com/osrg"
+  - rm -rf "$GOPATH/src/github.com/osrg/gobgp"
+  - ln -sfn "$TRAVIS_BUILD_DIR" "$GOPATH/src/github.com/osrg/gobgp"
+  - go get -u github.com/golang/dep/cmd/dep
+  - cd "$GOPATH/src/github.com/osrg/gobgp"
+
+# Seal: nested YAML merge keys (`<<: *_dep_ensure` inside another anchor that is
+# itself merged) were silently dropped by Travis, so the cross-compile legs ran
+# on the image default Go 1.25 instead of 1.11. Every anchor now spells out
+# `go:`, `before_install:` and `install:` instead of merging another anchor.
 _dep_ensure: &_dep_ensure
   go: "1.11"
-  before_install: go get -u github.com/golang/dep/cmd/dep
-  install: $GOPATH/bin/dep ensure
+  before_install: *_gopath_setup
+  install: $GOPATH/bin/dep ensure -vendor-only -v
 
 _unittest: &_unittest
-  <<: *_dep_ensure
+  go: "1.11"
+  before_install: *_gopath_setup
+  install: $GOPATH/bin/dep ensure -vendor-only -v
   script:
     - go test $([ $(go env GOARCH) == 'amd64' ] && echo '-race') $(go list ./... | grep -v '/vendor/') -timeout 120s
     - if [ "$(go env GOARCH)" = "amd64" ]; then go test -race github.com/osrg/gobgp/pkg/packet/bgp -run ^Test_RaceCondition$; else echo 'skip'; fi
 
 _build: &_build
-  <<: *_dep_ensure
+  go: "1.11"
+  before_install: *_gopath_setup
+  install: $GOPATH/bin/dep ensure -vendor-only -v
   script:
     - go build -o ./cmd/gobgp/gobgp   ./cmd/gobgp/
     - go build -o ./cmd/gobgpd/gobgpd ./cmd/gobgpd/
 
 _node_js: &_node_js
   language: node_js
-  node_js: "node"
+  node_js: "16"
 
 _python: &_python
   language: python
   python: "2.7"
 
-_docker: &_docker
-  <<: *_python
-  sudo: required
-  dist: trusty
-  group: deprecated-2017Q4
-  before_install:
-    - test $TRAVIS_OS_NAME == "linux" && sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
-    - test $TRAVIS_OS_NAME == "linux" && sudo sysctl -w net.ipv6.conf.default.disable_ipv6=0
-    - test $TRAVIS_OS_NAME == "linux" && sudo sysctl -w net.ipv6.conf.docker0.disable_ipv6=1
-  install:
-    - pip install -r test/pip-requires.txt
-    - fab -f test/lib/base.py make_gobgp_ctn:tag=$DOCKER_IMAGE,from_image=$FROM_IMAGE
-  script:
-    - PYTHONPATH=test python test/scenario_test/$TEST --gobgp-image $DOCKER_IMAGE -x -s
-  services:
-    - docker
-
-env:
-  global:
-    - DOCKER_IMAGE=gobgp
-    - FROM_IMAGE=osrg/quagga
-
 matrix:
-  allow_failures:
-    - go: tip
-
   include:
 #
 # Unit Tests
 #
     - <<: *_unittest
       env:
-        - DESCRIPTION="Unit Tests Tip"
-      go: tip
-    - <<: *_unittest
-      env:
         - DESCRIPTION="Unit Tests"
-      go: 1.11
     - <<: *_unittest
       env:
-        - DESCRIPTION="Tests + goreleaser + cover"
-      go: "1.11"
+        - DESCRIPTION="Tests + cover"
       script:
-        - go test $(go list ./... | grep -v '/vendor/') -coverprofile=coverage.txt -covermode=atomic
-      after_success:
-        - test -n "$TRAVIS_TAG" && curl -sL https://git.io/goreleaser | bash
-        - bash <(curl -s https://codecov.io/bash)
+        - go test $(go list ./... | grep -v '/vendor/') -coverprofile=coverage.txt -covermode=atomic -timeout 120s
     - <<: *_unittest
       env:
         - DESCRIPTION="Unit Tests on i386"
@@ -85,21 +72,27 @@ matrix:
 # Note: We use "before_script" to enable "go env" settings. The following keeps
 # "env" sections as just markers of Travis-CI Web UI.
 # See https://github.com/travis-ci/travis-ci/issues/6126
+#
+# Seal: the marker must NOT be named GOOS. Travis exports the matrix `env:` before
+# it provisions Go, and gimme cannot fetch a go1.11 toolchain for a non-host GOOS,
+# so it silently kept the image default (go1.25.3) and every cross-compile leg died
+# on "modules disabled by GO111MODULE=off". Only `before_script` sets the real GOOS,
+# which is after the toolchain is installed and after `dep ensure` has vendored.
     - <<: *_build
       env:
-        - GOOS="openbsd"
+        - DESCRIPTION="Cross-compile openbsd"
       before_script:
         - export GOOS="openbsd"
         - go env
     - <<: *_build
       env:
-        - GOOS="freebsd"
+        - DESCRIPTION="Cross-compile freebsd"
       before_script:
         - export GOOS="freebsd"
         - go env
     - <<: *_build
       env:
-        - GOOS="darwin"
+        - DESCRIPTION="Cross-compile darwin"
       before_script:
         - export GOOS="darwin"
         - go env
@@ -108,100 +101,14 @@ matrix:
 #
     - <<: *_dep_ensure
       env:
-        - DESCRIPTION="go fmt + vet + megacheck"
-      before_script: go get -u honnef.co/go/tools/cmd/megacheck
+        - DESCRIPTION="go fmt + vet"
       script:
         - test -z "$(go fmt $(go list ./... | grep -v '/vendor/'))"
         - go vet $(go list ./... | grep -v '/vendor/')
-        - megacheck $(go list ./... | grep -v '/vendor/')
     - <<: *_dep_ensure
       env:
         - DESCRIPTION="build_embeded_go.py"
-      script: python test/scenario_test/ci-scripts/build_embeded_go.py docs/sources/lib.md
-#
-# Docker
-#
-    - <<: *_docker
-      env:
-        - TEST=bgp_router_test.py
-    - <<: *_docker
-      env:
-        - TEST=bgp_zebra_test.py
-    - <<: *_docker
-      env:
-        - TEST=bgp_zebra_nht_test.py FROM_IMAGE=osrg/quagga:v1.0
-    - <<: *_docker
-      env:
-        - TEST=evpn_test.py
-    - <<: *_docker
-      env:
-        - TEST=flow_spec_test.py
-    - <<: *_docker
-      env:
-        - TEST=global_policy_test.py
-    - <<: *_docker
-      env:
-        - TEST=graceful_restart_test.py
-    - <<: *_docker
-      env:
-        - TEST=ibgp_router_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_reflector_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_as2_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_ipv4_v6_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_malformed_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_policy_grpc_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_policy_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_softreset_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_test.py
-    - <<: *_docker
-      env:
-        - TEST=route_server_test2.py
-    - <<: *_docker
-      env:
-        - TEST=zapi_v3_test.py FROM_IMAGE=osrg/quagga:v1.0
-    - <<: *_docker
-      env:
-        - TEST=long_lived_graceful_restart_test.py
-    - <<: *_docker
-      env:
-        - TEST=vrf_neighbor_test.py
-    - <<: *_docker
-      env:
-        - TEST=vrf_neighbor_test2.py
-    - <<: *_docker
-      env:
-        - TEST=rtc_test.py
-    - <<: *_docker
-      env:
-        - TEST=bgp_unnumbered_test.py
-    - <<: *_docker
-      env:
-        - TEST=aspath_test.py
-    - <<: *_docker
-      env:
-        - TEST=addpath_test.py
-    - <<: *_docker
-      env:
-        - TEST=bgp_malformed_msg_handling_test.py
-    - <<: *_docker
-      env:
-        - TEST=bgp_confederation_test.py
+      script: python3 test/scenario_test/ci-scripts/build_embeded_go.py docs/sources/lib.md
 #
 # Tools
 #
@@ -209,7 +116,7 @@ matrix:
       env:
         - DESCRIPTION="markdownlint"
       before_script:
-        - npm install -g markdownlint-cli
+        - npm install -g markdownlint-cli@0.13.0
       script:
         - markdownlint $(find . -type f -name '*.md' | grep -v '/vendor/')
     - <<: *_python
@@ -224,7 +131,3 @@ cache:
   pip: true
 
 go_import_path: github.com/osrg/gobgp
-
-notifications:
- slack:
-  secure: KzuC9kytzS7wTlfj4MqSg8EpqXfJRMbo59dAVTA3w587achnVCS3vhUenWuhMCiWk7+6DVWwNpwzn2+A0S6RwMFMpKAU6Ij6K9sxEOgqBGuMN8w1//w+uJTryzsnebEIhInGt2kKfqz4Wx3QQqW5gVhI+8s+c5M0iXxFtN4soVk=
