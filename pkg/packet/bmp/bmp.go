@@ -327,6 +327,9 @@ func NewBMPStatisticsReport(p BMPPeerHeader, stats []BMPStatsTLVInterface) *BMPM
 }
 
 func (body *BMPStatisticsReport) ParseBody(msg *BMPMessage, data []byte) error {
+	if len(data) < 4 {
+		return fmt.Errorf("BMP Statistics Report body too short: %d bytes", len(data))
+	}
 	body.Count = binary.BigEndian.Uint32(data[0:4])
 	data = data[4:]
 	for len(data) >= 4 {
@@ -474,6 +477,9 @@ func NewBMPPeerUpNotification(p BMPPeerHeader, lAddr string, lPort, rPort uint16
 }
 
 func (body *BMPPeerUpNotification) ParseBody(msg *BMPMessage, data []byte) error {
+	if len(data) < 20 {
+		return fmt.Errorf("BMP Peer Up Notification body too short: %d bytes", len(data))
+	}
 	if msg.PeerHeader.Flags&BMP_PEER_FLAG_IPV6 != 0 {
 		body.LocalAddress = net.IP(data[:16]).To16()
 	} else {

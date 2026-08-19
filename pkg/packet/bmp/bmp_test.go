@@ -16,6 +16,8 @@
 package bmp
 
 import (
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/osrg/gobgp/pkg/packet/bgp"
@@ -102,4 +104,59 @@ func Test_BogusHeader(t *testing.T) {
 	h, err := ParseBMPMessage(make([]byte, 10))
 	assert.Nil(t, h)
 	assert.NotNil(t, err)
+}
+
+// bogusBMPMessage builds a syntactically valid BMP header and peer header
+// followed by a truncated body, so that ParseBody() is reached with a body
+// shorter than the fixed part it reads.
+func bogusBMPMessage(msgType uint8, flags uint8, body []byte) []byte {
+	buf := make([]byte, BMP_HEADER_SIZE+BMP_PEER_HEADER_SIZE)
+	buf[0] = BMP_VERSION
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(buf)+len(body)))
+	buf[5] = msgType
+	buf[BMP_HEADER_SIZE+1] = flags
+	return append(buf, body...)
+}
+
+func Test_StatisticsReportBodyTooShort(t *testing.T) {
+	for _, l := range []int{0, 1, 2, 3} {
+		data := make([]byte, l)
+		msg := &BMPMessage{}
+		body := &BMPStatisticsReport{}
+		var err error
+		assert.NotPanics(t, func() {
+			err = body.ParseBody(msg, data)
+		})
+		assert.EqualError(t, err, fmt.Sprintf("BMP Statistics Report body too short: %d bytes", l))
+	}
+
+	// The same truncation reached through the public entry point.
+	for _, l := range []int{0, 1, 2, 3} {
+		m, err := ParseBMPMessage(bogusBMPMessage(BMP_MSG_STATISTICS_REPORT, 0, make([]byte, l)))
+		assert.Nil(t, m)
+		assert.EqualError(t, err, fmt.Sprintf("BMP Statistics Report body too short: %d bytes", l))
+	}
+}
+
+func Test_PeerUpNotificationBodyTooShort(t *testing.T) {
+	for _, flags := range []uint8{0, BMP_PEER_FLAG_IPV6} {
+		for _, l := range []int{0, 1, 12, 15, 16, 18, 19} {
+			data := make([]byte, l)
+			msg := &BMPMessage{}
+			msg.PeerHeader.Flags = flags
+			body := &BMPPeerUpNotification{}
+			var err error
+			assert.NotPanics(t, func() {
+				err = body.ParseBody(msg, data)
+			})
+			assert.EqualError(t, err, fmt.Sprintf("BMP Peer Up Notification body too short: %d bytes", l))
+		}
+
+		// The same truncation reached through the public entry point.
+		for _, l := range []int{0, 1, 12, 15, 16, 18, 19} {
+			m, err := ParseBMPMessage(bogusBMPMessage(BMP_MSG_PEER_UP_NOTIFICATION, flags, make([]byte, l)))
+			assert.Nil(t, m)
+			assert.EqualError(t, err, fmt.Sprintf("BMP Peer Up Notification body too short: %d bytes", l))
+		}
+	}
 }
