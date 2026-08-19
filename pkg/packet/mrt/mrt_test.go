@@ -300,3 +300,47 @@ func TestMrtSplit(t *testing.T) {
 	t.Logf("scanner scanned %d serialized keepalives from the buffer", numread)
 	assert.Equal(t, numwrite, numread)
 }
+
+// TestBGP4MPHeaderInsufficientBytes tests CVE-2025-43970 fix
+// Ensures proper length validation before accessing data
+func TestBGP4MPHeaderInsufficientBytes(t *testing.T) {
+	// Test AS4 with insufficient initial bytes (needs 12, provide less)
+	h1 := &BGP4MPHeader{isAS4: true}
+	_, err := h1.decodeFromBytes(make([]byte, 7))
+	assert.Error(t, err, "Should error with insufficient AS4 bytes")
+
+	// Test non-AS4 with insufficient initial bytes (needs 8, provide less)
+	h2 := &BGP4MPHeader{isAS4: false}
+	_, err = h2.decodeFromBytes(make([]byte, 5))
+	assert.Error(t, err, "Should error with insufficient AS bytes")
+
+	// Test IPv4 with insufficient bytes after header (needs 12 bytes after AFI field)
+	// Build minimal valid header but insufficient for IPv4 addresses
+	data := make([]byte, 10)
+	// Set AS4 fields (8 bytes)
+	// Set InterfaceIndex (2 bytes at offset 8)
+	// Set AddressFamily to IPv4 (2 bytes at offset 10) - but we only have 10 bytes total
+	data[8] = 0x00
+	data[9] = 0x00
+	h3 := &BGP4MPHeader{isAS4: true}
+	_, err = h3.decodeFromBytes(data)
+	assert.Error(t, err, "Should error with insufficient IPv4 peer bytes")
+
+	// Test with proper size for AS4 header but insufficient for IPv4 (needs 12 more bytes)
+	data = make([]byte, 12)
+	// Peer AS and Local AS (8 bytes)
+	// InterfaceIndex (2 bytes)
+	data[10] = 0x00
+	data[11] = 0x01 // AFI_IP = 1
+	h4 := &BGP4MPHeader{isAS4: true}
+	_, err = h4.decodeFromBytes(data)
+	assert.Error(t, err, "Should error when IPv4 addresses cannot fit")
+
+	// Test IPv6 with insufficient bytes (needs 36 bytes after AFI field)
+	data = make([]byte, 20)
+	data[10] = 0x00
+	data[11] = 0x02 // AFI_IP6 = 2
+	h5 := &BGP4MPHeader{isAS4: true}
+	_, err = h5.decodeFromBytes(data)
+	assert.Error(t, err, "Should error when IPv6 addresses cannot fit")
+}
